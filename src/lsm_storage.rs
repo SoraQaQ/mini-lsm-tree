@@ -410,11 +410,14 @@ impl LsmStorageInner {
         lower: Bound<&[u8]>,
         upper: Bound<&[u8]>,
     ) -> Result<FusedIterator<LsmIterator>> {
-        let guard = self.state.read().clone();
-        let memtable_iter = guard.memtable.scan(lower, upper);
-        let mut iters = Vec::with_capacity(guard.imm_memtables.len() + 1);
+        let snapshot = {
+            let guard = self.state.read();
+            Arc::clone(&guard)
+        };
+        let memtable_iter = snapshot.memtable.scan(lower, upper);
+        let mut iters = Vec::with_capacity(snapshot.imm_memtables.len() + 1);
         iters.push(Box::new(memtable_iter));
-        for imm_memtable in &guard.imm_memtables {
+        for imm_memtable in &snapshot.imm_memtables {
             let imm_memtable_iter = imm_memtable.scan(lower, upper);
             iters.push(Box::new(imm_memtable_iter));
         }
