@@ -18,10 +18,16 @@
 use std::path::Path;
 use std::sync::Arc;
 
-use anyhow::Result;
+use anyhow::{Ok, Result};
+use bytes::{BufMut, Bytes};
 
 use super::{BlockMeta, SsTable};
-use crate::{block::BlockBuilder, key::KeySlice, lsm_storage::BlockCache};
+use crate::{
+    block::BlockBuilder,
+    key::{KeyBytes, KeySlice},
+    lsm_storage::BlockCache,
+    table::FileObject,
+};
 
 /// Builds an SSTable from key-value pairs.
 pub struct SsTableBuilder {
@@ -36,7 +42,15 @@ pub struct SsTableBuilder {
 impl SsTableBuilder {
     /// Create a builder based on target block size.
     pub fn new(block_size: usize) -> Self {
-        unimplemented!()
+        let builder = BlockBuilder::new(block_size);
+        Self {
+            builder,
+            first_key: Vec::new(),
+            last_key: Vec::new(),
+            data: Vec::new(),
+            meta: Vec::new(),
+            block_size,
+        }
     }
 
     /// Adds a key-value pair to SSTable.
@@ -44,7 +58,37 @@ impl SsTableBuilder {
     /// Note: You should split a new block when the current block is full.(`std::mem::replace` may
     /// be helpful here)
     pub fn add(&mut self, key: KeySlice, value: &[u8]) {
-        unimplemented!()
+        if self.builder.add(key, value) {
+            if self.first_key.is_empty() {
+                self.first_key = key.raw_ref().to_vec();
+            }
+            self.last_key = key.raw_ref().to_vec();
+            return;
+        }
+
+        assert!(
+            !self.builder.is_empty(),
+            "empty block fit in an empty block"
+        );
+
+        let old_builder = std::mem::replace(&mut self.builder, BlockBuilder::new(self.block_size));
+        let block = old_builder.build();
+
+        self.meta.push(BlockMeta {
+            offset: self.data.len(),
+            first_key: KeyBytes::from_bytes(Bytes::copy_from_slice(&self.first_key)),
+            last_key: KeyBytes::from_bytes(Bytes::copy_from_slice(&self.last_key)),
+        });
+
+        self.data.extend_from_slice(&block.encode());
+
+        assert!(
+            self.builder.add(key, value),
+            "entry cannot fit in an empty block"
+        );
+
+        self.first_key = key.raw_ref().to_vec();
+        self.last_key = key.raw_ref().to_vec();
     }
 
     /// Get the estimated size of the SSTable.
@@ -52,7 +96,7 @@ impl SsTableBuilder {
     /// Since the data blocks contain much more data than meta blocks, just return the size of data
     /// blocks here.
     pub fn estimated_size(&self) -> usize {
-        unimplemented!()
+        self.data.len()
     }
 
     /// Builds the SSTable and writes it to the given path. Use the `FileObject` structure to manipulate the disk objects.
@@ -62,7 +106,45 @@ impl SsTableBuilder {
         block_cache: Option<Arc<BlockCache>>,
         path: impl AsRef<Path>,
     ) -> Result<SsTable> {
-        unimplemented!()
+        if self.meta.is_empty() && self.builder.is_empty() {
+            anyhow::bail!("cannot build an empty SST");
+        }
+
+        if !self.builder.is_empty() {
+            let block = self.builder.build();
+
+            self.meta.push(BlockMeta {
+                offset: self.data.len(),
+                first_key: KeyBytes::from_bytes(Bytes::copy_from_slice(&self.first_key)),
+                last_key: KeyBytes::from_bytes(Bytes::copy_from_slice(&self.last_key)),
+            });
+
+            self.data.extend_from_slice(&block.encode());
+        }
+        let block_meta_offset = self.data.len();
+
+        let encode_meta_offset = u32::try_from(block_meta_offset)?;
+
+        BlockMeta::encode_block_meta(&self.meta, &mut self.data);
+
+        self.data.put_u32(encode_meta_offset);
+
+        let first_key = self.meta.first().unwrap().first_key.clone();
+        let last_key = self.meta.last().unwrap().last_key.clone();
+
+        let file = FileObject::create(path.as_ref(), self.data)?;
+
+        Ok(SsTable {
+            file,
+            block_meta: self.meta,
+            block_meta_offset,
+            id,
+            block_cache,
+            first_key,
+            last_key,
+            bloom: None,
+            max_ts: 0,
+        })
     }
 
     #[cfg(test)]
