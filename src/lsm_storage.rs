@@ -322,19 +322,22 @@ impl LsmStorageInner {
             }
         }
 
+        let mut sstables_iters = Vec::with_capacity(snapshot.l0_sstables.len());
+
         for sst_id in &snapshot.l0_sstables {
             let sstable = snapshot.sstables[sst_id].clone();
-            let mut iter =
-                SsTableIterator::create_and_seek_to_key(sstable, KeySlice::from_slice(key))?;
+            let iter = SsTableIterator::create_and_seek_to_key(sstable, KeySlice::from_slice(key))?;
 
-            if iter.is_valid() && iter.key().raw_ref() == key {
-                if iter.value().is_empty() {
-                    return Ok(None);
-                }
-                return Ok(Some(Bytes::copy_from_slice(iter.value())));
-            } else {
-                iter.next()?;
+            sstables_iters.push(Box::new(iter));
+        }
+
+        let iter = MergeIterator::create(sstables_iters);
+
+        if iter.is_valid() && iter.key().raw_ref() == key {
+            if iter.value().is_empty() {
+                return Ok(None);
             }
+            return Ok(Some(Bytes::copy_from_slice(iter.value())));
         }
         Ok(None)
     }
@@ -440,7 +443,7 @@ impl LsmStorageInner {
             iters.push(Box::new(imm_memtable_iter));
         }
 
-        let mut sstable_iters = Vec::with_capacity(snapshot.l0_sstables.len() + 1);
+        let mut sstable_iters = Vec::with_capacity(snapshot.l0_sstables.len());
         for sstable_id in &snapshot.l0_sstables {
             let table = snapshot.sstables[sstable_id].clone();
             let sstable_iter = match lower {
