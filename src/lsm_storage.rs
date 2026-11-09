@@ -344,6 +344,14 @@ impl LsmStorageInner {
             if key < sstable.first_key().raw_ref() || key > sstable.last_key().raw_ref() {
                 continue;
             }
+
+            if let Some(bloom) = &sstable.bloom {
+                let hash = farmhash::fingerprint32(key);
+                if !bloom.may_contain(hash) {
+                    continue;
+                }
+            }
+
             let iter = SsTableIterator::create_and_seek_to_key(sstable, KeySlice::from_slice(key))?;
 
             sstables_iters.push(Box::new(iter));
