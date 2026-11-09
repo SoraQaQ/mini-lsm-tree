@@ -79,7 +79,6 @@ impl BlockBuilder {
             return false;
         };
 
-        // add offset
         let overlap = if self.is_empty() {
             0
         } else {
@@ -105,6 +104,7 @@ impl BlockBuilder {
             self.first_key = key.to_key_vec();
         }
 
+        // add offset
         self.offsets.push(offset);
 
         // add key
