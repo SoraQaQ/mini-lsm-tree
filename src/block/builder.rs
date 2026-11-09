@@ -51,6 +51,17 @@ impl BlockBuilder {
         SIZEOF_U16 + self.offsets.len() * SIZEOF_U16 + self.data.len()
     }
 
+    fn common_prefix_len(a: &[u8], b: &[u8]) -> usize {
+        let mut prefix = 0;
+        for (left, right) in a.iter().zip(b) {
+            if left != right {
+                break;
+            }
+            prefix += 1;
+        }
+        prefix
+    }
+
     /// Adds a key-value pair to the block. Returns false when the block is full.
     /// You may find the `bytes::BufMut` trait useful for manipulating binary data.
     #[must_use]
@@ -59,14 +70,28 @@ impl BlockBuilder {
         let Ok(key_len) = u16::try_from(key.len()) else {
             return false;
         };
+
         let Ok(value_len) = u16::try_from(value.len()) else {
             return false;
         };
 
-        let entry_size = key
+        let Ok(offset) = u16::try_from(self.data.len()) else {
+            return false;
+        };
+
+        // add offset
+        let overlap = if self.is_empty() {
+            0
+        } else {
+            BlockBuilder::common_prefix_len(self.first_key.as_key_slice().raw_ref(), key.raw_ref())
+        };
+
+        let rest = &key.raw_ref()[overlap..];
+
+        let entry_size = rest
             .len()
             .saturating_add(value.len())
-            .saturating_add(SIZEOF_U16 * 3);
+            .saturating_add(SIZEOF_U16 * 4);
 
         let block_is_full = self.establish_size() + entry_size > self.block_size;
         let offset_is_full = self.data.len() > usize::from(u16::MAX);
@@ -76,16 +101,17 @@ impl BlockBuilder {
             return false;
         }
 
-        let Ok(offset) = u16::try_from(self.data.len()) else {
-            return false;
-        };
+        if self.is_empty() {
+            self.first_key = key.to_key_vec();
+        }
 
-        // add offset
         self.offsets.push(offset);
 
         // add key
-        self.data.put_u16(key.len() as u16);
-        self.data.put(key.raw_ref());
+        self.data.put_u16(overlap as u16);
+        self.data.put_u16(rest.len() as u16);
+
+        self.data.put(rest);
 
         self.data.put_u16(value.len() as u16);
         self.data.put(value);

@@ -40,12 +40,24 @@ pub struct BlockIterator {
 
 impl BlockIterator {
     fn new(block: Arc<Block>) -> Self {
+        let first_key = if block.offsets.is_empty() {
+            KeyVec::new()
+        } else {
+            let offset = block.offsets[0] as usize;
+            let data = &block.data;
+
+            let key_len = u16::from_be_bytes([data[offset + 2], data[offset + 3]]) as usize;
+            let key_start = offset + 4;
+
+            KeyVec::from_vec(data[key_start..key_start + key_len].to_vec())
+        };
+
         Self {
             block,
             key: KeyVec::new(),
             value_range: (0, 0),
             idx: 0,
-            first_key: KeyVec::new(),
+            first_key,
         }
     }
 
@@ -121,15 +133,19 @@ impl BlockIterator {
 
         let data = &self.block.data;
 
-        let key_len = u16::from_be_bytes([data[offset], data[offset + 1]]) as usize;
+        let overlap_len = u16::from_be_bytes([data[offset], data[offset + 1]]) as usize;
 
-        let key_start = offset + SIZEOF_U16;
-        let key_end = key_start + key_len;
-        let key = KeyVec::from_vec(data[key_start..key_end].to_vec());
+        let rest_len = u16::from_be_bytes([data[offset + 2], data[offset + 3]]) as usize;
 
-        if self.first_key.is_empty() {
-            self.first_key = key.clone();
-        }
+        let key_start = offset + SIZEOF_U16 + SIZEOF_U16;
+        let key_end = key_start + rest_len;
+
+        let mut raw_key = Vec::new();
+
+        raw_key.extend_from_slice(&self.first_key.raw_ref()[..overlap_len]);
+        raw_key.extend_from_slice(&data[key_start..key_end]);
+
+        let key = KeyVec::from_vec(raw_key);
 
         self.key = key;
 
