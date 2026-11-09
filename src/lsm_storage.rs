@@ -341,6 +341,9 @@ impl LsmStorageInner {
 
         for sst_id in &snapshot.l0_sstables {
             let sstable = snapshot.sstables[sst_id].clone();
+            if key < sstable.first_key().raw_ref() || key > sstable.last_key().raw_ref() {
+                continue;
+            }
             let iter = SsTableIterator::create_and_seek_to_key(sstable, KeySlice::from_slice(key))?;
 
             sstables_iters.push(Box::new(iter));
@@ -496,6 +499,25 @@ impl LsmStorageInner {
         let mut sstable_iters = Vec::with_capacity(snapshot.l0_sstables.len());
         for sstable_id in &snapshot.l0_sstables {
             let table = snapshot.sstables[sstable_id].clone();
+
+            let first = table.first_key().raw_ref();
+            let last = table.last_key().raw_ref();
+            let below_lower = match lower {
+                Bound::Included(key) => last < key,
+                Bound::Excluded(key) => last <= key,
+                Bound::Unbounded => false,
+            };
+
+            let above = match upper {
+                Bound::Included(key) => first > key,
+                Bound::Excluded(key) => first >= key,
+                Bound::Unbounded => false,
+            };
+
+            if below_lower || above {
+                continue;
+            }
+
             let sstable_iter = match lower {
                 Bound::Included(key) => {
                     SsTableIterator::create_and_seek_to_key(table, KeySlice::from_slice(key))?
@@ -503,7 +525,6 @@ impl LsmStorageInner {
                 Bound::Excluded(key) => {
                     let mut iter =
                         SsTableIterator::create_and_seek_to_key(table, KeySlice::from_slice(key))?;
-
                     if iter.is_valid() && iter.key().raw_ref() == key {
                         iter.next()?;
                     }
