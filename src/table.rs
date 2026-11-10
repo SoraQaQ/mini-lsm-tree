@@ -229,11 +229,9 @@ impl SsTable {
     /// Note: You may want to make use of the `first_key` stored in `BlockMeta`.
     /// You may also assume the key-value pairs stored in each consecutive block are sorted.
     pub fn find_block_idx(&self, key: KeySlice) -> usize {
-        // find the key >= first key ans sub 1
-        // a e k find f
-        // k >= f get index 2
-        // sub 1
-        // get index 1
+        // partition_point returns the first block whose first_key > key,
+        // then step back to the last block whose first_key <= key.
+        // e.g. first_keys = [a, e, k], search f -> partition_point = 2 -> idx = 1
         self.block_meta
             .partition_point(|meta| meta.first_key.as_key_slice() <= key)
             .saturating_sub(1)
