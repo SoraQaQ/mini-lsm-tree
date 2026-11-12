@@ -129,7 +129,63 @@ impl LsmStorageInner {
     fn compact(&self, task: &CompactionTask) -> Result<Vec<Arc<SsTable>>> {
         match task {
             CompactionTask::Leveled(leveled_compaction_task) => todo!(),
-            CompactionTask::Tiered(tiered_compaction_task) => todo!(),
+            CompactionTask::Tiered(tiered_compaction_task) => {
+                let snapshot = {
+                    let guard = self.state.read();
+                    Arc::clone(&guard)
+                };
+
+                let mut sstable_result = Vec::new();
+
+                let tiers = &tiered_compaction_task.tiers;
+
+                let mut merge_iters = Vec::new();
+                for (_, sst_ids) in tiers {
+                    let mut sstables = Vec::new();
+                    for sst_id in sst_ids {
+                        let sstable = snapshot.sstables[sst_id].clone();
+                        sstables.push(sstable);
+                    }
+
+                    let iter = SstConcatIterator::create_and_seek_to_first(sstables)?;
+                    merge_iters.push(Box::new(iter));
+                }
+
+                let mut iter = MergeIterator::create(merge_iters);
+
+                let mut has_entries = false;
+
+                let mut builder = SsTableBuilder::new(self.options.block_size);
+
+                while iter.is_valid() {
+                    if !iter.value().is_empty() || !tiered_compaction_task.bottom_tier_included {
+                        builder.add(iter.key(), iter.value());
+                        has_entries = true;
+
+                        if builder.estimated_size() >= self.options.target_sst_size {
+                            let id = self.next_sst_id();
+                            let sstable = builder.build(
+                                id,
+                                Some(self.block_cache.clone()),
+                                self.path_of_sst(id),
+                            )?;
+                            builder = SsTableBuilder::new(self.options.block_size);
+                            has_entries = false;
+                            sstable_result.push(Arc::new(sstable));
+                        }
+                    }
+                    iter.next()?;
+                }
+
+                if has_entries {
+                    let id = self.next_sst_id();
+                    let sstable =
+                        builder.build(id, Some(self.block_cache.clone()), self.path_of_sst(id))?;
+                    sstable_result.push(Arc::new(sstable));
+                }
+
+                Ok(sstable_result)
+            }
             CompactionTask::Simple(simple_leveled_compaction_task) => {
                 let snapshot = {
                     let guard = self.state.read();
