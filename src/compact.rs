@@ -127,7 +127,11 @@ pub enum CompactionOptions {
 }
 
 impl LsmStorageInner {
-    fn compact_with_iter<I>(&self, iter: &mut I, keep_bottom: bool) -> Result<Vec<Arc<SsTable>>>
+    fn compact_with_iter<I>(
+        &self,
+        iter: &mut I,
+        compact_to_bottom: bool,
+    ) -> Result<Vec<Arc<SsTable>>>
     where
         I: for<'a> StorageIterator<KeyType<'a> = KeySlice<'a>>,
     {
@@ -136,7 +140,7 @@ impl LsmStorageInner {
         let mut has_entries = false;
 
         while iter.is_valid() {
-            if !iter.value().is_empty() || !keep_bottom {
+            if !iter.value().is_empty() || !compact_to_bottom {
                 builder.add(iter.key(), iter.value());
                 has_entries = true;
                 if builder.estimated_size() >= self.options.target_sst_size {
@@ -336,6 +340,8 @@ impl LsmStorageInner {
 
         let new_ssts = self.compact(&task)?;
 
+        self.sync_dir()?;
+
         let CompactionTask::ForceFullCompaction {
             l0_sstables,
             l1_sstables,
@@ -346,6 +352,17 @@ impl LsmStorageInner {
 
         {
             let _state_lock = self.state_lock.lock();
+            let recorded_task = CompactionTask::ForceFullCompaction {
+                l0_sstables: l0_sstables.clone(),
+                l1_sstables: l1_sstables.clone(),
+            };
+            let output = new_ssts.iter().map(|sst| sst.sst_id()).collect();
+            if let Some(ref manifset) = self.manifest {
+                manifset.add_record(
+                    &_state_lock,
+                    crate::manifest::ManifestRecord::Compaction(recorded_task, output),
+                )?;
+            }
             let mut guard = self.state.write();
             let mut snapshot = guard.as_ref().clone();
 
@@ -367,6 +384,7 @@ impl LsmStorageInner {
         for id in l0_sstables.iter().chain(l1_sstables.iter()) {
             std::fs::remove_file(self.path_of_sst(*id))?;
         }
+        self.sync_dir()?;
 
         Ok(())
     }
@@ -380,6 +398,7 @@ impl LsmStorageInner {
         if let Some(task) = task {
             let new_sst = self.compact(&task)?;
             let output: Vec<usize> = new_sst.iter().map(|sst| sst.sst_id()).collect();
+            self.sync_dir()?;
 
             let obsolete_ids = {
                 let _state_lock = self.state_lock.lock();
@@ -398,6 +417,12 @@ impl LsmStorageInner {
                         .sort_by_key(|sst_id| snapshot.sstables[sst_id].first_key());
                 }
 
+                if let Some(ref manifest) = self.manifest {
+                    manifest.add_record(
+                        &_state_lock,
+                        crate::manifest::ManifestRecord::Compaction(task, output),
+                    )?;
+                }
                 for id in &obsolete_ids {
                     snapshot.sstables.remove(id);
                 }
@@ -410,6 +435,7 @@ impl LsmStorageInner {
             for id in obsolete_ids {
                 std::fs::remove_file(self.path_of_sst(id))?;
             }
+            self.sync_dir()?;
         }
 
         Ok(())
