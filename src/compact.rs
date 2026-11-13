@@ -23,6 +23,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use anyhow::{Ok, Result};
+use clap::builder;
 pub use leveled::{LeveledCompactionController, LeveledCompactionOptions, LeveledCompactionTask};
 use serde::{Deserialize, Serialize};
 pub use simple_leveled::{
@@ -128,7 +129,139 @@ pub enum CompactionOptions {
 impl LsmStorageInner {
     fn compact(&self, task: &CompactionTask) -> Result<Vec<Arc<SsTable>>> {
         match task {
-            CompactionTask::Leveled(leveled_compaction_task) => todo!(),
+            CompactionTask::Leveled(leveled_compaction_task) => {
+                let snapshot = {
+                    let guard = self.state.read();
+                    Arc::clone(&guard)
+                };
+
+                let mut sstable_result = Vec::new();
+
+                match leveled_compaction_task.upper_level {
+                    None => {
+                        let mut upper_iter =
+                            Vec::with_capacity(leveled_compaction_task.upper_level_sst_ids.len());
+                        for sst_id in &leveled_compaction_task.upper_level_sst_ids {
+                            let sstable = snapshot.sstables[sst_id].clone();
+                            let iter = SsTableIterator::create_and_seek_to_first(sstable)?;
+                            upper_iter.push(Box::new(iter));
+                        }
+
+                        let merge_upper_iter = MergeIterator::create(upper_iter);
+
+                        let mut sstables =
+                            Vec::with_capacity(leveled_compaction_task.lower_level_sst_ids.len());
+                        for sst_id in &leveled_compaction_task.lower_level_sst_ids {
+                            let sstable = snapshot.sstables[sst_id].clone();
+                            sstables.push(sstable);
+                        }
+
+                        let concat_lower_iter =
+                            SstConcatIterator::create_and_seek_to_first(sstables)?;
+
+                        let mut iter =
+                            TwoMergeIterator::create(merge_upper_iter, concat_lower_iter)?;
+
+                        let mut builder = SsTableBuilder::new(self.options.block_size);
+
+                        let mut has_entries = false;
+
+                        while iter.is_valid() {
+                            if !iter.value().is_empty()
+                                || !leveled_compaction_task.is_lower_level_bottom_level
+                            {
+                                builder.add(iter.key(), iter.value());
+                                has_entries = true;
+                                if builder.estimated_size() >= self.options.target_sst_size {
+                                    let id = self.next_sst_id();
+                                    let sstable = builder.build(
+                                        id,
+                                        Some(self.block_cache.clone()),
+                                        self.path_of_sst(id),
+                                    )?;
+                                    builder = SsTableBuilder::new(self.options.block_size);
+                                    sstable_result.push(Arc::new(sstable));
+                                    has_entries = false;
+                                }
+                            }
+                            iter.next()?;
+                        }
+
+                        if has_entries {
+                            let id = self.next_sst_id();
+                            let sstable = builder.build(
+                                id,
+                                Some(self.block_cache.clone()),
+                                self.path_of_sst(id),
+                            )?;
+
+                            sstable_result.push(Arc::new(sstable));
+                        }
+                    }
+                    Some(upper_level) => {
+                        let mut upper_sstables =
+                            Vec::with_capacity(leveled_compaction_task.upper_level_sst_ids.len());
+                        for sst_id in &leveled_compaction_task.upper_level_sst_ids {
+                            let sstable = snapshot.sstables[sst_id].clone();
+                            upper_sstables.push(sstable);
+                        }
+
+                        let concat_upper_iter =
+                            SstConcatIterator::create_and_seek_to_first(upper_sstables)?;
+
+                        let mut lower_sstables =
+                            Vec::with_capacity(leveled_compaction_task.lower_level_sst_ids.len());
+                        for sst_id in &leveled_compaction_task.lower_level_sst_ids {
+                            let sstable = snapshot.sstables[sst_id].clone();
+                            lower_sstables.push(sstable);
+                        }
+
+                        let concat_lower_iter =
+                            SstConcatIterator::create_and_seek_to_first(lower_sstables)?;
+
+                        let mut iter =
+                            TwoMergeIterator::create(concat_upper_iter, concat_lower_iter)?;
+
+                        let mut builder = SsTableBuilder::new(self.options.block_size);
+
+                        let mut has_entries = false;
+
+                        while iter.is_valid() {
+                            if !iter.value().is_empty()
+                                || !leveled_compaction_task.is_lower_level_bottom_level
+                            {
+                                builder.add(iter.key(), iter.value());
+                                has_entries = true;
+                                if builder.estimated_size() >= self.options.target_sst_size {
+                                    let id = self.next_sst_id();
+                                    let sstable = builder.build(
+                                        id,
+                                        Some(self.block_cache.clone()),
+                                        self.path_of_sst(id),
+                                    )?;
+                                    builder = SsTableBuilder::new(self.options.block_size);
+                                    sstable_result.push(Arc::new(sstable));
+                                    has_entries = false;
+                                }
+                            }
+                            iter.next()?;
+                        }
+
+                        if has_entries {
+                            let id = self.next_sst_id();
+                            let sstable = builder.build(
+                                id,
+                                Some(self.block_cache.clone()),
+                                self.path_of_sst(id),
+                            )?;
+
+                            sstable_result.push(Arc::new(sstable));
+                        }
+                    }
+                }
+
+                Ok(sstable_result)
+            }
             CompactionTask::Tiered(tiered_compaction_task) => {
                 let snapshot = {
                     let guard = self.state.read();
@@ -439,6 +572,12 @@ impl LsmStorageInner {
 
                 for sstable in &new_sst {
                     snapshot.sstables.insert(sstable.sst_id(), sstable.clone());
+                }
+
+                if let CompactionTask::Leveled(task) = &task {
+                    snapshot.levels[task.lower_level - 1]
+                        .1
+                        .sort_by_key(|sst_id| snapshot.sstables[sst_id].first_key());
                 }
 
                 for id in &obsolete_ids {
