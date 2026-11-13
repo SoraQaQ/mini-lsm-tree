@@ -260,8 +260,6 @@ impl LsmStorageInner {
                     Arc::clone(&guard)
                 };
 
-                let mut sstable_result = Vec::new();
-
                 match simple_leveled_compaction_task.upper_level {
                     Some(level) => {
                         let mut upper_sstables = Vec::with_capacity(
