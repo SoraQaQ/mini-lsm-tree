@@ -144,22 +144,22 @@ impl LeveledCompactionController {
             }
         }
 
-        if let Some(ratio) = ratio {
-            if ratio.1 > 1.0 {
-                return Some(LeveledCompactionTask {
-                    upper_level: Some(ratio.0 + 1 as usize),
-                    upper_level_sst_ids: vec![
-                        snapshot.levels[ratio.0].1.iter().copied().min().unwrap(),
-                    ],
-                    lower_level: ratio.0 + 2,
-                    lower_level_sst_ids: self.find_overlapping_ssts(
-                        snapshot,
-                        &vec![snapshot.levels[ratio.0].1.iter().copied().min().unwrap()],
-                        ratio.0 + 2,
-                    ),
-                    is_lower_level_bottom_level: ratio.0 + 2 == self.options.max_levels,
-                });
-            }
+        if let Some(ratio) = ratio
+            && ratio.1 > 1.0
+        {
+            return Some(LeveledCompactionTask {
+                upper_level: Some(ratio.0 + 1usize),
+                upper_level_sst_ids: vec![
+                    snapshot.levels[ratio.0].1.iter().copied().min().unwrap(),
+                ],
+                lower_level: ratio.0 + 2,
+                lower_level_sst_ids: self.find_overlapping_ssts(
+                    snapshot,
+                    &[snapshot.levels[ratio.0].1.iter().copied().min().unwrap()],
+                    ratio.0 + 2,
+                ),
+                is_lower_level_bottom_level: ratio.0 + 2 == self.options.max_levels,
+            });
         }
 
         None
