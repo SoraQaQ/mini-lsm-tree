@@ -62,13 +62,28 @@ impl MemTable {
     }
 
     /// Week 2 Day 6: create a memtable backed by a write-ahead log.
-    pub fn create_with_wal(_id: usize, _path: impl AsRef<Path>) -> Result<Self> {
-        unimplemented!()
+    pub fn create_with_wal(id: usize, path: impl AsRef<Path>) -> Result<Self> {
+        let mut table = Self::create(id);
+        table.wal = Some(Wal::create(path)?);
+        Ok(table)
     }
 
     /// Week 2 Day 6: recover a memtable from its write-ahead log.
-    pub fn recover_from_wal(_id: usize, _path: impl AsRef<Path>) -> Result<Self> {
-        unimplemented!()
+    pub fn recover_from_wal(id: usize, path: impl AsRef<Path>) -> Result<Self> {
+        let mut table = Self::create(id);
+        table.wal = Some(Wal::recover(path, &table.map)?);
+
+        let size = table
+            .map
+            .iter()
+            .map(|entry| entry.key().len() + entry.value().len())
+            .sum();
+
+        table
+            .approximate_size
+            .store(size, std::sync::atomic::Ordering::Relaxed);
+
+        Ok(table)
     }
 
     pub fn for_testing_put_slice(&self, key: &[u8], value: &[u8]) -> Result<()> {
@@ -101,6 +116,9 @@ impl MemTable {
     /// Week 2 Day 6: also append the data to the write-ahead log.
     /// Week 3 Day 5: route the write through the batch WAL implementation.
     pub fn put(&self, key: &[u8], value: &[u8]) -> Result<()> {
+        if let Some(wal) = &self.wal {
+            wal.put(key, value)?;
+        }
         self.map
             .insert(Bytes::copy_from_slice(key), Bytes::copy_from_slice(value));
         self.approximate_size.fetch_add(
